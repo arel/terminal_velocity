@@ -88,7 +88,8 @@ class IndexEventHandler(PatternMatchingEventHandler):
         super(IndexEventHandler, self).__init__(*args, **kwargs)
 
         self.index_basepath = basepath
-        self.index_connection = sqlite3.connect(":memory:")
+        self.index_connection = sqlite3.connect(
+            ":memory:", check_same_thread=False)
         self.index_cursor = self.index_connection.cursor()
         self.index_cursor.execute(
             """
@@ -108,7 +109,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
             INSERT INTO docs(title, body) VALUES (?, ?);
             """, (title, body))
         if commit:
-            self.index_cursor.commit()
+            self.index_connection.commit()
 
     def remove_from_index(self, filename, commit=True):
         title = parse_title(self.index_basepath, filename)
@@ -119,7 +120,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
             DELETE FROM docs WHERE title = ?;
             """, (title,))
         if commit:
-            self.index_cursor.commit()
+            self.index_connection.commit()
 
     def on_moved(self, event):
         super(IndexEventHandler, self).on_moved(event)
@@ -129,8 +130,8 @@ class IndexEventHandler(PatternMatchingEventHandler):
                      event.dest_path)
 
         if what == 'file':
-            remove_from_index(event.src_path)
-            add_to_index(event.dest_path)
+            self.remove_from_index(event.src_path)
+            self.add_to_index(event.dest_path)
 
     def on_created(self, event):
         super(IndexEventHandler, self).on_created(event)
@@ -139,7 +140,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
         logging.info("Created %s: %s", what, event.src_path)
 
         if what == 'file':
-            add_to_index(event.src_path)
+            self.add_to_index(event.src_path)
 
     def on_deleted(self, event):
         super(IndexEventHandler, self).on_deleted(event)
@@ -148,7 +149,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
         logging.info("Deleted %s: %s", what, event.src_path)
 
         if what == 'file':
-            remove_from_index(event.src_path)
+            self.remove_from_index(event.src_path)
 
     def on_modified(self, event):
         super(IndexEventHandler, self).on_modified(event)
@@ -157,8 +158,8 @@ class IndexEventHandler(PatternMatchingEventHandler):
         logging.info("Modified %s: %s", what, event.src_path)
 
         if what == 'file':
-            remove_from_index(event.src_path)
-            add_to_index(event.src_path)
+            self.remove_from_index(event.src_path)
+            self.add_to_index(event.src_path)
 
 def unicode_or_bust(raw_text):
     """Return the given raw text data decoded to unicode.
@@ -440,11 +441,10 @@ class PlainTextNoteBook(object):
             basepath=self.path,
             ignore_directories=True,
             case_sensitive=True,
-            patterns=self.extensions)
+            patterns=["*" + x for x in self.extensions])
 
         # Read any existing note files in the notes directory.
         self._notes = []
-        import pudb; pu.db
         for root, dirs, files in os.walk(self.path):
 
             # ignore any dirs we don't want to check
@@ -476,6 +476,12 @@ class PlainTextNoteBook(object):
                     self.index.add_to_index(abspath, commit=False)
 
             self.index.index_connection.commit()
+            self.index
+
+        # start watching file system
+        self.observer = Observer()
+        self.observer.schedule(self.index, self.path, recursive=True)
+        self.observer.start()
 
     @property
     def path(self):
