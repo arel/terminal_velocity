@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO,
                     datefmt='%Y-%m-%d %H:%M:%S')
 
 
-def parse_title(cls, basepath, filename):
+def parse_title(basepath, filename):
     abspath = os.path.abspath(filename)
     relpath = os.path.relpath(abspath, basepath)
     relpath, ext = os.path.splitext(relpath)
@@ -84,12 +84,12 @@ def parse_title(cls, basepath, filename):
 class IndexEventHandler(PatternMatchingEventHandler):
     """Indexes files."""
 
-    def __init__(self, *args, basepath="", **kwargs):
-        super(LoggingEventHandler, self).__init__(*args, **kwargs)
+    def __init__(self, basepath, *args, **kwargs):
+        super(IndexEventHandler, self).__init__(*args, **kwargs)
 
         self.index_basepath = basepath
-        self.index_db = sqlite3.connect(":memory:")
-        self.index_cursor = self.index_db.index_cursor()
+        self.index_connection = sqlite3.connect(":memory:")
+        self.index_cursor = self.index_connection.cursor()
         self.index_cursor.execute(
             """
             CREATE VIRTUAL TABLE docs USING fts4(title, body);
@@ -106,7 +106,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
         self.index_cursor.execute(
             """
             INSERT INTO docs(title, body) VALUES (?, ?);
-            """, title, body)
+            """, (title, body))
         if commit:
             self.index_cursor.commit()
 
@@ -117,12 +117,12 @@ class IndexEventHandler(PatternMatchingEventHandler):
         self.index_cursor.execute(
             """
             DELETE FROM docs WHERE title = ?;
-            """, title)
+            """, (title,))
         if commit:
             self.index_cursor.commit()
 
     def on_moved(self, event):
-        super(LoggingEventHandler, self).on_moved(event)
+        super(IndexEventHandler, self).on_moved(event)
 
         what = 'directory' if event.is_directory else 'file'
         logging.info("Moved %s: from %s to %s", what, event.src_path,
@@ -133,7 +133,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
             add_to_index(event.dest_path)
 
     def on_created(self, event):
-        super(LoggingEventHandler, self).on_created(event)
+        super(IndexEventHandler, self).on_created(event)
 
         what = 'directory' if event.is_directory else 'file'
         logging.info("Created %s: %s", what, event.src_path)
@@ -142,7 +142,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
             add_to_index(event.src_path)
 
     def on_deleted(self, event):
-        super(LoggingEventHandler, self).on_deleted(event)
+        super(IndexEventHandler, self).on_deleted(event)
 
         what = 'directory' if event.is_directory else 'file'
         logging.info("Deleted %s: %s", what, event.src_path)
@@ -151,7 +151,7 @@ class IndexEventHandler(PatternMatchingEventHandler):
             remove_from_index(event.src_path)
 
     def on_modified(self, event):
-        super(LoggingEventHandler, self).on_modified(event)
+        super(IndexEventHandler, self).on_modified(event)
 
         what = 'directory' if event.is_directory else 'file'
         logging.info("Modified %s: %s", what, event.src_path)
@@ -444,6 +444,7 @@ class PlainTextNoteBook(object):
 
         # Read any existing note files in the notes directory.
         self._notes = []
+        import pudb; pu.db
         for root, dirs, files in os.walk(self.path):
 
             # ignore any dirs we don't want to check
@@ -466,14 +467,15 @@ class PlainTextNoteBook(object):
 
                 # Make a Note object for the file and add it to this NoteBook.
                 abspath = os.path.join(root, filename)
+                _, ext = os.path.splitext(abspath)
                 title = parse_title(self.path, abspath)
                 if title:
-                    self.add_new(title=unicode_relpath, extension=ext)
+                    self.add_new(title=title, extension=ext)
 
                     # index the file
                     self.index.add_to_index(abspath, commit=False)
 
-            self.index.cursor.commit()
+            self.index.index_connection.commit()
 
     @property
     def path(self):
