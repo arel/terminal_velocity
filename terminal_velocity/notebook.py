@@ -56,9 +56,109 @@ import logging
 logger = logging.getLogger(__name__)
 import os
 import sys
+import sqlite3
+from watchdog.observers import Observer
+from watchdog.events import PatternMatchingEventHandler
+import logging
 
 import chardet
 
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
+
+
+def parse_title(cls, basepath, filename):
+    abspath = os.path.abspath(filename)
+    relpath = os.path.relpath(abspath, basepath)
+    relpath, ext = os.path.splitext(relpath)
+    title = unicode_or_bust(relpath)
+    if title is None:
+        # The filename could not be decoded.
+        logger.error(
+                "Could not decode filename: {0}".format(relpath))
+    return title
+
+
+class IndexEventHandler(PatternMatchingEventHandler):
+    """Indexes files."""
+
+    def __init__(self, *args, basepath="", **kwargs):
+        super(LoggingEventHandler, self).__init__(*args, **kwargs)
+
+        self.index_basepath = basepath
+        self.index_db = sqlite3.connect(":memory:")
+        self.index_cursor = self.index_db.index_cursor()
+        self.index_cursor.execute(
+            """
+            CREATE VIRTUAL TABLE docs USING fts4(title, body);
+            """)
+
+    def add_to_index(self, filename, commit=True):
+        title = parse_title(self.index_basepath, filename)
+        if not title:
+            return
+        with open(filename, "r") as f:
+            body = unicode_or_bust(f.read())
+            if body is None:
+                return
+        self.index_cursor.execute(
+            """
+            INSERT INTO docs(title, body) VALUES (?, ?);
+            """, title, body)
+        if commit:
+            self.index_cursor.commit()
+
+    def remove_from_index(self, filename, commit=True):
+        title = parse_title(self.index_basepath, filename)
+        if not title:
+            return
+        self.index_cursor.execute(
+            """
+            DELETE FROM docs WHERE title = ?;
+            """, title)
+        if commit:
+            self.index_cursor.commit()
+
+    def on_moved(self, event):
+        super(LoggingEventHandler, self).on_moved(event)
+
+        what = 'directory' if event.is_directory else 'file'
+        logging.info("Moved %s: from %s to %s", what, event.src_path,
+                     event.dest_path)
+
+        if what == 'file':
+            remove_from_index(event.src_path)
+            add_to_index(event.dest_path)
+
+    def on_created(self, event):
+        super(LoggingEventHandler, self).on_created(event)
+
+        what = 'directory' if event.is_directory else 'file'
+        logging.info("Created %s: %s", what, event.src_path)
+
+        if what == 'file':
+            add_to_index(event.src_path)
+
+    def on_deleted(self, event):
+        super(LoggingEventHandler, self).on_deleted(event)
+
+        what = 'directory' if event.is_directory else 'file'
+        logging.info("Deleted %s: %s", what, event.src_path)
+
+        if what == 'file':
+            remove_from_index(event.src_path)
+
+    def on_modified(self, event):
+        super(LoggingEventHandler, self).on_modified(event)
+
+        what = 'directory' if event.is_directory else 'file'
+        logging.info("Modified %s: %s", what, event.src_path)
+
+        if what == 'file':
+            remove_from_index(event.src_path)
+            add_to_index(event.src_path)
 
 def unicode_or_bust(raw_text):
     """Return the given raw text data decoded to unicode.
@@ -199,8 +299,9 @@ class PlainTextNote(object):
                 raise NewNoteError(
                         u"{0} could not be created: {1}".format(directory, e))
 
-        # Create an empty file if the file doesn't exist.
-        open(self.abspath, 'a')
+        # Create (touch) an empty file if the file doesn't exist.
+        with open(self.abspath, 'a') as f:
+            pass
 
     @property
     def title(self):
@@ -217,7 +318,9 @@ class PlainTextNote(object):
 
     @property
     def contents(self):
-        contents = unicode_or_bust(open(self.abspath, "r").read())
+        contents = None
+        with open(self.abspath, "r") as f:
+            contents = unicode_or_bust(f.read())
         if contents is None:
             logger.error(
                 u"Could not decode file contents: {0}".format(self.abspath))
@@ -332,6 +435,13 @@ class PlainTextNoteBook(object):
             # TODO: Check that self.path is a directory, if not raise.
             pass
 
+        # Create index
+        self.index = IndexEventHandler(
+            basepath=self.path,
+            ignore_directories=True,
+            case_sensitive=True,
+            patterns=self.extensions)
+
         # Read any existing note files in the notes directory.
         self._notes = []
         for root, dirs, files in os.walk(self.path):
@@ -356,15 +466,14 @@ class PlainTextNoteBook(object):
 
                 # Make a Note object for the file and add it to this NoteBook.
                 abspath = os.path.join(root, filename)
-                relpath = os.path.relpath(abspath, self.path)
-                relpath, ext = os.path.splitext(relpath)
-                unicode_relpath = unicode_or_bust(relpath)
-                if relpath is None:
-                    # The filename could not be decoded.
-                    logger.error(
-                            "Could not decode filename: {0}".format(relpath))
-                else:
+                title = parse_title(self.path, abspath)
+                if title:
                     self.add_new(title=unicode_relpath, extension=ext)
+
+                    # index the file
+                    self.index.add_to_index(abspath, commit=False)
+
+            self.index.cursor.commit()
 
     @property
     def path(self):
